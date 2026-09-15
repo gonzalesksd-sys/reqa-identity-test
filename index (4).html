@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>REQA Google Identity Test</title>
+
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+
+  <style>
+    :root {
+      font-family: Arial, Helvetica, sans-serif;
+      color: #172033;
+      background: #f5f7fa;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+    }
+
+    .card {
+      width: min(720px, 100%);
+      background: #fff;
+      border: 1px solid #dce3ec;
+      border-radius: 18px;
+      box-shadow: 0 12px 36px rgba(16, 44, 82, .08);
+      padding: 30px;
+    }
+
+    h1 {
+      margin: 0 0 8px;
+      color: #143a6b;
+      font-size: 28px;
+    }
+
+    p { line-height: 1.55; }
+
+    .note {
+      padding: 13px 15px;
+      border: 1px solid #cadef4;
+      border-radius: 12px;
+      background: #eef5fc;
+      margin: 18px 0;
+    }
+
+    #buttonWrap {
+      margin: 24px 0 18px;
+      min-height: 44px;
+    }
+
+    .result {
+      display: none;
+      margin-top: 22px;
+      padding-top: 20px;
+      border-top: 1px solid #e7ebf0;
+    }
+
+    .result.visible { display: block; }
+
+    .row {
+      margin: 10px 0;
+      padding: 10px 12px;
+      border-radius: 10px;
+      background: #f8fafc;
+      overflow-wrap: anywhere;
+    }
+
+    .label {
+      display: block;
+      font-size: 12px;
+      font-weight: 700;
+      color: #667085;
+      text-transform: uppercase;
+      letter-spacing: .05em;
+      margin-bottom: 4px;
+    }
+
+    .fingerprint {
+      font-family: Consolas, Menlo, monospace;
+      font-size: 18px;
+      font-weight: 700;
+      color: #143a6b;
+    }
+
+    button {
+      margin-top: 12px;
+      border: 0;
+      border-radius: 9px;
+      padding: 10px 14px;
+      background: #e9eef5;
+      color: #172033;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .ok {
+      color: #1d6a36;
+      font-weight: 700;
+    }
+
+    .error {
+      color: #9b2226;
+      font-weight: 700;
+      white-space: pre-wrap;
+    }
+
+    .small {
+      color: #667085;
+      font-size: 13px;
+    }
+  </style>
+</head>
+
+<body>
+  <main class="card">
+    <h1>REQA Google Identity Test</h1>
+    <p>
+      This isolated test checks whether Google gives the same stable account identity
+      on two devices, while giving a different identity to a different Google account.
+    </p>
+
+    <div class="note">
+      <strong>This is not the survey.</strong> It does not save questionnaire answers,
+      does not write to Google Sheets, and does not send your decoded account details
+      to a custom backend.
+    </div>
+
+    <div id="configError" class="error"></div>
+
+    <div id="buttonWrap"></div>
+
+    <section id="result" class="result">
+      <p class="ok">✓ Google identity received</p>
+
+      <div class="row">
+        <span class="label">Selected Google account</span>
+        <span id="accountEmail"></span>
+      </div>
+
+      <div class="row">
+        <span class="label">Display name</span>
+        <span id="accountName"></span>
+      </div>
+
+      <div class="row">
+        <span class="label">Anonymous test fingerprint</span>
+        <span id="fingerprint" class="fingerprint"></span>
+      </div>
+
+      <div class="row">
+        <span class="label">Hosted domain claim (if present)</span>
+        <span id="hostedDomain"></span>
+      </div>
+
+      <button type="button" id="chooseAnother">Choose another Google account</button>
+
+      <p class="small">
+        The fingerprint is SHA-256(sub), truncated for display. Google's stable
+        account identifier ("sub") is decoded only in this browser for this test.
+        This page has no custom server endpoint.
+      </p>
+    </section>
+
+    <div id="runtimeError" class="error"></div>
+  </main>
+
+  <script>
+    // STEP 1: Replace this exact placeholder with the OAuth Web Client ID
+    // created in Google Cloud Console.
+    const CLIENT_ID = 'PASTE_YOUR_WEB_CLIENT_ID_HERE.apps.googleusercontent.com';
+
+    function isConfigured() {
+      return CLIENT_ID &&
+        !CLIENT_ID.startsWith('PASTE_YOUR_WEB_CLIENT_ID_HERE') &&
+        CLIENT_ID.endsWith('.apps.googleusercontent.com');
+    }
+
+    function decodeJwtPayload(jwt) {
+      const parts = jwt.split('.');
+      if (parts.length !== 3) throw new Error('Unexpected Google credential format.');
+
+      let base64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+      while (base64.length % 4) base64 += '=';
+
+      const json = decodeURIComponent(
+        atob(base64)
+          .split('')
+          .map(c => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2))
+          .join('')
+      );
+
+      return JSON.parse(json);
+    }
+
+    async function sha256Hex(text) {
+      const bytes = new TextEncoder().encode(text);
+      const digest = await crypto.subtle.digest('SHA-256', bytes);
+      return Array.from(new Uint8Array(digest))
+        .map(b => b.toString(16).padStart(2, '0'))
+        .join('');
+    }
+
+    async function handleCredentialResponse(response) {
+      try {
+        document.getElementById('runtimeError').textContent = '';
+
+        if (!response || !response.credential) {
+          throw new Error('Google did not return an ID credential.');
+        }
+
+        const payload = decodeJwtPayload(response.credential);
+
+        if (!payload.sub) {
+          throw new Error('The Google ID token did not contain a sub identifier.');
+        }
+
+        // IMPORTANT:
+        // This browser-side decoding is acceptable ONLY for this identity spike.
+        // Production must verify the ID token server-side before trusting "sub".
+        const fingerprint = (await sha256Hex(payload.sub)).slice(0, 16).toUpperCase();
+
+        document.getElementById('accountEmail').textContent =
+          payload.email || '(email claim not present)';
+
+        document.getElementById('accountName').textContent =
+          payload.name || '(name claim not present)';
+
+        document.getElementById('fingerprint').textContent = fingerprint;
+
+        document.getElementById('hostedDomain').textContent =
+          payload.hd || '(none — likely not a Google Workspace account)';
+
+        document.getElementById('result').classList.add('visible');
+      } catch (err) {
+        document.getElementById('runtimeError').textContent =
+          'ERROR: ' + (err && err.message ? err.message : String(err));
+      }
+    }
+
+    function initializeGoogleIdentity() {
+      if (!isConfigured()) {
+        document.getElementById('configError').textContent =
+          'SETUP REQUIRED: Replace PASTE_YOUR_WEB_CLIENT_ID_HERE in index.html with your Google OAuth Web Client ID.';
+        return;
+      }
+
+      if (!window.google || !google.accounts || !google.accounts.id) {
+        document.getElementById('runtimeError').textContent =
+          'Google Identity Services did not load. Check the internet connection and reload.';
+        return;
+      }
+
+      google.accounts.id.initialize({
+        client_id: CLIENT_ID,
+        callback: handleCredentialResponse,
+        auto_select: false,
+        cancel_on_tap_outside: false,
+        context: 'use'
+      });
+
+      google.accounts.id.renderButton(
+        document.getElementById('buttonWrap'),
+        {
+          type: 'standard',
+          theme: 'outline',
+          size: 'large',
+          shape: 'pill',
+          text: 'continue_with',
+          width: 320
+        }
+      );
+    }
+
+    document.getElementById('chooseAnother').addEventListener('click', () => {
+      if (window.google && google.accounts && google.accounts.id) {
+        google.accounts.id.disableAutoSelect();
+      }
+
+      document.getElementById('result').classList.remove('visible');
+      document.getElementById('runtimeError').textContent =
+        'Click “Continue with Google” and choose the other account in Google’s account chooser.';
+    });
+
+    window.addEventListener('load', () => {
+      // The GIS script is async/defer. Give it a brief moment if window load
+      // fires before the library has finished initializing.
+      let attempts = 0;
+
+      const timer = setInterval(() => {
+        attempts += 1;
+
+        if (window.google && google.accounts && google.accounts.id) {
+          clearInterval(timer);
+          initializeGoogleIdentity();
+        } else if (attempts >= 40) {
+          clearInterval(timer);
+          document.getElementById('runtimeError').textContent =
+            'Google Identity Services did not become available. Reload the page or check blocked scripts/cookies.';
+        }
+      }, 100);
+    });
+  </script>
+</body>
+</html>
